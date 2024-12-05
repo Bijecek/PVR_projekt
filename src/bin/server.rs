@@ -1,20 +1,12 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::{fs, thread, io};
-use std::collections::HashMap;
+use std::{fs, thread};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
-use std::process::exit;
-use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime};
-use ratatui::{crossterm::event::{self, KeyCode}, DefaultTerminal, Frame};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use std::time::{SystemTime};
 use chrono::{DateTime, Datelike, Local, Timelike};
-use ratatui::style::{Color, Style};
 use serde::{Deserialize, Serialize};
 use users::{get_user_by_uid, get_group_by_gid};
-use serde_json::json;
 
 #[derive(Serialize, Deserialize)]
 struct FileResponse {
@@ -26,13 +18,12 @@ fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:7878")?;
     println!("Server listening on port 7878...");
 
-
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
                     handle_client(stream);
-                    println!("Client handled");
+                    println!("Client closed connection");
                 });
             }
             Err(e) => {
@@ -40,7 +31,6 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-
     Ok(())
 }
 fn handle_client(mut stream: TcpStream) {
@@ -68,7 +58,7 @@ fn handle_client(mut stream: TcpStream) {
                     let path = path.trim_end_matches('\0');
 
                     let dir_info = load_and_parse_dir(path, *visual_index);
-                    let response = json!(dir_info).to_string();
+                    let response = serde_json::to_string(&dir_info).unwrap();
 
                     if let Err(e) = stream.write_all(response.as_bytes()) {
                         eprintln!("Failed to send response: {}", e);
@@ -76,8 +66,6 @@ fn handle_client(mut stream: TcpStream) {
                 }
                 else if request.starts_with("GET_FILE"){
                     let path_and_visual_index = request.trim().strip_prefix("GET_FILE ").unwrap();
-
-
                     // Remove any trailing \0 character
                     let path = path_and_visual_index.trim_end_matches('\0');
 
@@ -91,20 +79,17 @@ fn handle_client(mut stream: TcpStream) {
                             message: error_message,
                         }
                     };
-                    let response_serialized = serde_json::to_string(&response).expect("Failed to serialize response");
+                    let response_serialized = serde_json::to_string(&response).unwrap();
                     if let Err(e) = stream.write_all(response_serialized.as_bytes()) {
                         eprintln!("Failed to send response: {}", e);
                     }
-
                 }
             }
             Err(e) => {
                 eprintln!("Failed to read from client: {}", e);
-                //break;
             }
         }
     }
-
 }
 fn convert_rwx_bits(mode: u32) -> String {
     let mut rwx :Vec<String> = vec![];
@@ -131,10 +116,8 @@ fn convert_rwx_bits(mode: u32) -> String {
             one_category.push('-');
         }
         shift -= 3;
-
         rwx.push(one_category)
     }
-
     format!("{}{}{}", rwx[0], rwx[1], rwx[2])
 }
 fn load_and_parse_dir(path: &str, current_visual_menu_option: i32) -> Vec<Vec<String>>{
@@ -160,8 +143,7 @@ fn load_and_parse_dir(path: &str, current_visual_menu_option: i32) -> Vec<Vec<St
         let month = datetime_local.month();
         let year = datetime_local.year();
 
-
-        //Add 0 if for better visual representation if there is only one digit
+        //Add 0 if for better visual representation if there is only one digit (9:03 -> 09:03)
         let formatted_minutes = format!("{:02}", minutes);
         let formatted_hours = format!("{:02}", hours);
         let formatted_day = format!("{:02}", day);
@@ -202,7 +184,6 @@ fn load_and_parse_dir(path: &str, current_visual_menu_option: i32) -> Vec<Vec<St
         entries_info.push(one_row);
     }
     entries_info
-
 }
 fn read_file_content(path: &str) -> Result<String, String> {
     let file = File::open(path);
