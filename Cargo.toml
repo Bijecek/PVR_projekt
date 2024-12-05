@@ -1,0 +1,12 @@
+[package]
+name = "client_server_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.29.0"
+chrono = "0.4.38"
+tui-menu = "0.2.3"
+users = "0.11"
+serde_json = "1.0.133"
+serde = { version = "1.0.215", features = ["derive"] }
