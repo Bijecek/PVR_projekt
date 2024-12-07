@@ -165,11 +165,19 @@ fn load_and_parse_dir(path: &str, current_visual_menu_option: i32) -> Vec<Vec<St
             let file_size = fs::metadata(&path).unwrap().len();
 
             let owner_id = fs::metadata(&path).unwrap().uid();
-            let owner_name = get_user_by_uid(owner_id).unwrap().name().to_string_lossy().into_owned();
-
+            let owner_name = match get_user_by_uid(owner_id) {
+                Some(user) => user.name().to_string_lossy().into_owned(),
+                None => {
+                    "Unknown".to_string()
+                }
+            };
             let group_id = fs::metadata(&path).unwrap().gid();
-            let group_name = get_group_by_gid(group_id).unwrap().name().to_string_lossy().into_owned();
-
+            let group_name = match get_user_by_uid(group_id) {
+                Some(group) => group.name().to_string_lossy().into_owned(),
+                None => {
+                    "Unknown".to_string()
+                }
+            };
             let mode = fs::metadata(&path).unwrap().mode();
             let transformed_permissions = convert_rwx_bits(mode);
 
