@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::{fs, io};
 use std::collections::HashMap;
+use std::fmt::format;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use ratatui::{crossterm::event::{self, KeyCode}, DefaultTerminal, Frame};
@@ -81,11 +82,13 @@ impl MenuOption {
     fn get_visual_titles(&self, title: String) -> Vec<String> {
         match &self {
             MenuOption::BasicInfo => {
-                let title_names_basic = [title.clone(), "Last Modified".to_string()];
+                let get_current_dir = format!{"/{}",title.split('/').last().unwrap().to_string()};
+                let title_names_basic = [get_current_dir, "Last Modified".to_string()];
                 Vec::from(title_names_basic)
             }
             MenuOption::MoreInfo => {
-                let title_names_advanced = [title.clone(), "Last Modified".to_string(), "File Size".to_string(), "Owner".to_string(), "Group".to_string(), "Permissions".to_string()];
+                let get_current_dir = format!{"/{}",title.split('/').last().unwrap().to_string()};
+                let title_names_advanced = [get_current_dir, "Last Modified".to_string(), "File Size".to_string(), "Owner".to_string(), "Group".to_string(), "Permissions".to_string()];
                 Vec::from(title_names_advanced)
             }
             _ => { Vec::new() }
@@ -111,7 +114,6 @@ fn main() {
             println!("Connected to server!");
 
             let terminal = ratatui::init();
-            //terminal.clear();
 
             let initial_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1";
 
@@ -119,7 +121,7 @@ fn main() {
 
             let mut client_variables = ClientLogic::new(entries_info, initial_path.to_string());
 
-            client_variables.run(terminal,&stream);
+            let _ = client_variables.run(terminal,&stream);
             //let _app_result = run(terminal, entries_info, initial_path.to_string(), &stream);
 
             ratatui::restore();
@@ -184,58 +186,6 @@ fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpS
         }
     }
 }
-fn transform_and_render(f: &mut Frame, layout: Rc<[Rect]>, mut state: ListState, title_names: Vec<String>, current_entries: &Vec<Vec<String>>) {
-    for i in 0..title_names.len() {
-        let mut atribute = List::new(current_entries.iter()
-            .map(|entry| entry[i].as_str())
-            .collect::<Vec<_>>());
-        let right_border_index = title_names.len() - 1;
-        let borders = match i {
-            0 => Borders::TOP | Borders::LEFT | Borders::BOTTOM,
-            // Guard due to runtime check
-            _ if i == right_border_index => Borders::TOP | Borders::BOTTOM | Borders::RIGHT,
-            _ => Borders::TOP | Borders::BOTTOM,
-        };
-        atribute = atribute.block(Block::default().borders(borders).title(title_names[i].clone()))
-            .highlight_style(Style::default().bg(Color::Yellow));
-
-        // Add a >> for first
-        if i == 0 {
-            atribute = atribute.highlight_symbol(">>");
-        }
-
-        // Render
-        f.render_stateful_widget(atribute, layout[i + 1], &mut state);
-    }
-}
-/*
-fn handle_input_field_operations<F, T>(operation: F, current_path: &str, input_field: &str, current_entries: &mut Vec<Vec<String>>, map: &mut HashMap<String, Vec<Vec<String>>>,
-                                       current_app_state: &mut AppStates, wrong_input: &mut bool, current_visual_menu_option: &i32, stream: &TcpStream) -> Result<(), String>
-where
-    F: FnOnce(&str) -> Result<T, io::Error>,
-{
-    if !input_field.is_empty() {
-        let new_dir_path = format!("{}/{}", current_path, input_field);
-
-        if let Err(_err) = operation(&new_dir_path) {
-            *wrong_input = true;
-            Err("Some error.".to_string())
-        } else {
-            *current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, current_path, Some(*current_visual_menu_option)).into();
-            map.insert(current_path.to_string(), current_entries.clone());
-
-            *current_app_state = AppStates::Browsing;
-            *wrong_input = false;
-            Ok(())
-        }
-    } else {
-        *wrong_input = true;
-        Err("Input field is empty.".to_string())
-    }
-}
-
- */
-
 fn create_menu_items<'a>() -> Vec<(MenuOption, ListItem<'a>)> {
     let mut output: Vec<(MenuOption, ListItem)> = Vec::new();
     for option in MenuOption::all() {
@@ -243,15 +193,23 @@ fn create_menu_items<'a>() -> Vec<(MenuOption, ListItem<'a>)> {
     }
     output
 }
-fn create_layouts(f: &mut Frame, basic_layout: &mut Rc<[Rect]>, view_layout: &mut Rc<[Rect]>, input_layout: &mut Rc<[Rect]>, view_height: &mut usize) {
-    // Split layout vertically - 85% for data, 15% for user input
+fn create_layouts(f: &mut Frame, basic_layout: &mut Rc<[Rect]>, view_layout: &mut Rc<[Rect]>, input_layout: &mut Rc<[Rect]>, path_layout: &mut Rc<[Rect]>, view_height: &mut usize) {
+    // Split layout vertically - 95% for data, 5% for user input
     let grid_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(85),
-            Constraint::Percentage(15),
+            Constraint::Percentage(90),
+            Constraint::Percentage(10),
         ])
         .split(f.area());
+    // Split layout vertically - 10% for path, 90% for data
+    *path_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(10),
+            Constraint::Percentage(90),
+        ])
+        .split(grid_layout[0]);
 
     // Split layout horizontally - for each data attribute one column
     *basic_layout = Layout::default()
@@ -266,7 +224,7 @@ fn create_layouts(f: &mut Frame, basic_layout: &mut Rc<[Rect]>, view_layout: &mu
             Constraint::Fill(1),
             //Constraint::Percentage(7.5 as u16),
         ])
-        .split(grid_layout[0]);
+        .split(path_layout[1]);
 
     // Split layout horizontally - 15% for menu, 85% for file content
     *view_layout = Layout::default()
@@ -282,8 +240,7 @@ fn create_layouts(f: &mut Frame, basic_layout: &mut Rc<[Rect]>, view_layout: &mu
     *input_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
+            Constraint::Percentage(100),
         ])
         .split(grid_layout[1]);
 }
@@ -498,7 +455,7 @@ impl ClientLogic {
             Err("Input field is empty.".to_string())
         }
     }
-    fn draw_layouts(&mut self, f : &mut Frame, basic_layout : &Rc<[Rect]>, input_layout: &Rc<[Rect]>, view_layout : &Rc<[Rect]>, menu : List){
+    fn draw_layouts(&mut self, f : &mut Frame, basic_layout : &Rc<[Rect]>, input_layout: &Rc<[Rect]>, view_layout : &Rc<[Rect]>, path_layout : &Rc<[Rect]>, menu : List){
         let title= if self.cached_flag {
             format!("{} (Cached)", self.current_path)
         } else {
@@ -507,10 +464,10 @@ impl ClientLogic {
 
         match self.current_menu_item_chosen {
             MenuOption::BasicInfo => {
-                transform_and_render(f, basic_layout.clone(), self.selected_content_row.clone(), MenuOption::BasicInfo.get_visual_titles(title.clone()), &self.current_entries);
+                self.transform_and_render(f, basic_layout.clone(), path_layout.clone(), MenuOption::BasicInfo.get_visual_titles(title.clone()));
             }
             MenuOption::MoreInfo => {
-                transform_and_render(f, basic_layout.clone(), self.selected_content_row.clone(), MenuOption::MoreInfo.get_visual_titles(title.clone()), &self.current_entries);
+                self.transform_and_render(f, basic_layout.clone(), path_layout.clone(), MenuOption::MoreInfo.get_visual_titles(title.clone()));
             }
             // All other MenuOptions
             _ => {
@@ -531,7 +488,7 @@ impl ClientLogic {
                             MenuOption::MoreInfo
                         };
 
-                        transform_and_render(f, basic_layout.clone(), self.selected_content_row.clone(), menu_option.get_visual_titles(title.clone()), &self.current_entries);
+                        self.transform_and_render(f, basic_layout.clone(), path_layout.clone(), menu_option.get_visual_titles(title.clone()));
 
                         // If we are creating add input_box to layout
                         if let AppStates::Creating = self.current_app_state {
@@ -675,6 +632,35 @@ impl ClientLogic {
             self.wrong_input = true;
         }
     }
+    fn transform_and_render(&mut self, f: &mut Frame, layout: Rc<[Rect]>, path_layout: Rc<[Rect]>, title_names: Vec<String>) {
+        for i in 0..title_names.len() {
+            let mut atribute = List::new(self.current_entries.iter()
+                .map(|entry| entry[i].as_str())
+                .collect::<Vec<_>>());
+            let right_border_index = title_names.len() - 1;
+            let borders = match i {
+                0 => Borders::TOP | Borders::LEFT | Borders::BOTTOM,
+                // Guard due to runtime check
+                _ if i == right_border_index => Borders::TOP | Borders::BOTTOM | Borders::RIGHT,
+                _ => Borders::TOP | Borders::BOTTOM,
+            };
+            atribute = atribute.block(Block::default().borders(borders).title(title_names[i].clone()))
+                .highlight_style(Style::default().bg(Color::Yellow));
+
+            // Add a >> for first
+            if i == 0 {
+                atribute = atribute.highlight_symbol(">>");
+                let path_box = Paragraph::new(self.current_path.clone())
+                    .block(Block::default().borders(Borders::ALL).title("Current directory path"))
+                    .style(Style::default().fg(Color::White));
+
+                f.render_widget(path_box, path_layout[0]);
+            }
+
+            // Render
+            f.render_stateful_widget(atribute, layout[i + 1], &mut self.selected_content_row);
+        }
+    }
     fn run(&mut self, mut terminal: DefaultTerminal, stream: &TcpStream) -> io::Result<()> {
         self.selected_content_row.select(Some(0));
         self.cache.insert(self.current_path.clone(), self.current_entries.clone());
@@ -693,6 +679,7 @@ impl ClientLogic {
 
         //Layouts
         let mut basic_layout = Layout::default().split(Default::default());
+        let mut path_layout = Layout::default().split(Default::default());
         let mut view_layout = Layout::default().split(Default::default());
         let mut input_layout = Layout::default().split(Default::default());
 
@@ -715,8 +702,8 @@ impl ClientLogic {
             // Main rendering logic
             terminal.draw(|f| {
                 // Create layouts - layouts need to be recreated every loop cause of the possibility of window resize
-                create_layouts(f, &mut basic_layout, &mut view_layout, &mut input_layout, &mut view_height);
-                self.draw_layouts(f, &basic_layout, &input_layout,&view_layout,menu.clone());
+                create_layouts(f, &mut basic_layout, &mut view_layout, &mut input_layout, &mut path_layout, &mut view_height);
+                self.draw_layouts(f, &basic_layout, &input_layout,&view_layout, &path_layout, menu.clone());
             })?;
 
             // Listen for events for 20 seconds, if no event occurs then exit the loop -> which reloads entries
