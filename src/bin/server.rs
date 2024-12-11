@@ -84,6 +84,16 @@ fn handle_client(mut stream: TcpStream) {
                         eprintln!("Failed to send response: {}", e);
                     }
                 }
+                else if request.starts_with("SAVE_FILE"){
+                    let path_and_visual_index = request.trim().strip_prefix("SAVE_FILE ").unwrap();
+
+                    let split_index = path_and_visual_index.rfind(';').unwrap();
+                    let path = &path_and_visual_index[..split_index];
+                    let file_content = &path_and_visual_index[split_index + 1..];
+                    if let Err(e) = update_file_content(path,file_content){
+                        eprintln!("Failed to save file: {}", e);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Failed to read from client: {}", e);
@@ -205,6 +215,21 @@ fn read_file_content(path: &str) -> Result<String, String> {
         }
         else{
             Ok(content)
+        }
+    }
+}
+fn update_file_content(path: &str, file_content : &str) -> Result<String, String>{
+    //Rewrite the current file
+    let mut file = File::create(path);
+    if let Err(_err) = file{
+        Err("Unable to open file.".to_string())
+    }
+    else{
+        if let Err(_err) = file.unwrap().write_all(file_content.as_ref()){
+            Err("Unable to write to file".to_string())
+        }
+        else{
+            Ok("".to_string())
         }
     }
 }

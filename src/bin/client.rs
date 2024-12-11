@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Lines, Read, Write};
 use std::net::TcpStream;
 use std::{fs, io};
 use std::clone::Clone;
@@ -15,17 +15,68 @@ use serde::Deserialize;
 use std::process;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 use ratatui::layout::Direction::Vertical;
+use ratatui::text::{Span, Text};
+use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-struct TwoSides{
-    current_side : ClientLogic,
-    both_sides: Vec<ClientLogic>,
+#[derive(Clone)]
+struct ClientLogic<'a>{
+    selected_content_row: ListState,
+    selected_menu_row: ListState,
+    current_entries : Vec<Vec<String>>,
+    current_path : String,
+    cache : HashMap<String, Vec<Vec<String>>>,
+    cached_flag : bool,
+    start : Instant,
+    refresh_entries : bool,
+    terminate : bool,
+    input_field : String,
+    current_app_state : AppStates,
+    wrong_input : bool,
+    menu_items_len: usize,
+    current_menu_option_index : i32,
+    current_menu_item_chosen: MenuOption,
+    file_content : String,
+    file_lines_count : usize,
+    scroll_offset : usize,
+    scroll_right_offset : usize,
+    text_area: TextArea<'a>,
+}
+impl <'a>ClientLogic<'a> {
+    fn new(current_entries : Vec<Vec<String>>, current_path : String) -> Self{
+        ClientLogic {
+            selected_content_row: ListState::default(),
+            selected_menu_row: ListState::default(),
+            current_entries,
+            current_path,
+            cache: Default::default(),
+            cached_flag : false,
+            start : Instant::now(),
+            refresh_entries : false,
+            terminate : false,
+            input_field : String::new(),
+            current_app_state : AppStates::Browsing,
+            wrong_input : false,
+            menu_items_len: 0,
+            current_menu_option_index : 0,
+            current_menu_item_chosen : MenuOption::BasicInfo,
+            file_content : String::new(),
+            file_lines_count : 0,
+            scroll_offset : 0,
+            scroll_right_offset : 0,
+            text_area : TextArea::default(),
+        }
+    }
+}
+struct TwoSides<'a>{
+    current_side : ClientLogic<'a>,
+    both_sides: Vec<ClientLogic<'a>>,
     // For viewing
     current_side_index: usize
 }
-impl TwoSides {
-    fn new(left_side : ClientLogic, right_side : ClientLogic) -> Self{
+impl <'a>TwoSides<'a> {
+    fn new(left_side : ClientLogic<'a>, right_side : ClientLogic<'a>) -> Self{
         TwoSides{
             current_side : left_side.clone(),
             both_sides : vec![left_side, right_side],
@@ -275,13 +326,18 @@ impl TwoSides {
 
                             f.render_widget(input_box, input_layout[i][0]);
 
-
                             let paragraph = Paragraph::new(self.current_side.file_content.clone())
                                 .block(Block::default().borders(Borders::ALL).title("File Content"))
                                 .style(Style::default().fg(Color::White))
-                                .scroll((self.current_side.scroll_offset as u16, 0));
+                                .scroll((self.current_side.scroll_offset as u16, self.current_side.scroll_right_offset as u16));
 
                             f.render_widget(paragraph, view_layout[i][1]);
+                        }
+                        AppStates::Editing => {
+                            self.current_side.text_area.set_block(
+                                Block::default()
+                                    .borders(Borders::ALL).title("File Content"));
+                            f.render_widget(&self.current_side.text_area, view_layout[i][1]);
                         }
                     }
                 }
@@ -326,106 +382,177 @@ impl TwoSides {
             self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
         }
     }
-    fn user_input_handling(&mut self, key : KeyEvent, stream : &TcpStream, menu_items : Vec<(MenuOption, ListItem)>, view_height : usize) {
+    fn key_esc_logic(&mut self){
+        self.current_side.input_field.clear();
+        self.current_side.wrong_input = false;
+        self.current_side.file_lines_count = 0;
+        self.current_side.scroll_offset = 0;
+        // Switch back to browsing
+        self.current_side.current_app_state = AppStates::Browsing;
+
+    }
+    fn browsing_key_logic(&mut self, key : KeyEvent, stream : &TcpStream, menu_items : Vec<(MenuOption, ListItem)>){
+        match key.code {
+            KeyCode::Up => {
+                self.key_up_down_logic(KeyCode::Up);
+            }
+            KeyCode::Down => {
+                self.key_up_down_logic(KeyCode::Down);
+            }
+            KeyCode::Right => {
+                self.key_right_logic(stream);
+            }
+            KeyCode::Left => {
+                self.key_left_logic(stream);
+            }
+            KeyCode::Esc => {
+                self.current_side.terminate = true;
+            }
+            KeyCode::Char('f') => {
+                self.key_f_logic();
+            }
+            KeyCode::Char('x') => {
+                self.switch_side();
+            }
+            KeyCode::Enter => {
+                if let Some(selected_index) = self.current_side.selected_menu_row.selected() {
+                    if let Some((option, _)) = menu_items.get(selected_index) {
+                        self.key_enter_browsing_logic(stream, option);
+                    }
+                }
+            }
+            _ => { self.current_side.refresh_entries = false; }
+        }
+    }
+    fn creating_key_logic(&mut self, key : KeyEvent, stream : &TcpStream, menu_items : Vec<(MenuOption, ListItem)>){
+        match key.code {
+            KeyCode::Enter => {
+                if let Some((option, _)) = menu_items.get(self.current_side.selected_menu_row.selected().unwrap()) {
+                    let mut res = Result::Err("e".to_string());
+                    match option {
+                        MenuOption::NewDir => {
+                            let new_dir = |path: &str| fs::create_dir(path);
+                            res = self.handle_input_field_operations(new_dir, stream);
+                        }
+                        MenuOption::DeleteDir => {
+                            let del_dir = |path: &str| fs::remove_dir(path);
+                            res = self.handle_input_field_operations(del_dir, stream);
+                        }
+                        MenuOption::NewFile => {
+                            let new_file = |path: &str| fs::File::create(path);
+                            res = self.handle_input_field_operations(new_file, stream);
+                        }
+                        MenuOption::DeleteFile => {
+                            let del_file = |path: &str| fs::remove_file(path);
+                            res = self.handle_input_field_operations(del_file, stream);
+                        }
+                        MenuOption::ViewFile => {
+                            self.view_file(stream);
+                        }
+                        _ => {}
+                    }
+                    if res == Ok(()) {
+                        self.current_side.input_field.clear();
+                    }
+                }
+            }
+            _ => {
+                self.handle_input_field_edit_keys(key.code);
+                self.current_side.refresh_entries = false;
+            }
+        }
+    }
+    fn viewing_key_logic(&mut self, key : KeyEvent, view_height : usize){
+        match key.code {
+            KeyCode::Up => {
+                if self.current_side.scroll_offset > 0 {
+                    self.current_side.scroll_offset -= 1;
+                }
+            }
+            KeyCode::Down => {
+                // Limit the down scroll
+                if self.current_side.file_lines_count >= self.current_side.scroll_offset as usize + view_height {
+                    self.current_side.scroll_offset += 1;
+                }
+            }
+            KeyCode::Left =>{
+                if self.current_side.scroll_right_offset > 0 {
+                    self.current_side.scroll_right_offset -= 1;
+                }
+            }
+            KeyCode::Right =>{
+                self.current_side.scroll_right_offset += 1;
+            }
+            KeyCode::Esc => {
+                self.key_esc_logic();
+            }
+            KeyCode::Char('i') => {
+                self.current_side.current_app_state = AppStates::Editing;
+                self.current_side.scroll_offset = 1;
+                self.current_side.scroll_right_offset = 0;
+
+                let splitted_vec: Vec<String> = self.current_side.file_content.split('\n')
+                    .map(|s| s.to_string())
+                    .collect();
+                self.current_side.text_area = TextArea::new(splitted_vec);
+            }
+            KeyCode::Char('x') => {
+                self.switch_side();
+            }
+            _ => {}
+        }
+        self.current_side.refresh_entries = false;
+    }
+    fn editing_key_logic(&mut self, key : KeyEvent, stream : &TcpStream){
+        match key.code {
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 's' => {
+                send_file_to_server(stream, format!{"{}/{}",self.current_side.current_path.as_str(), self.current_side.input_field}.as_str(), self.current_side.text_area.lines().join("\n"));
+
+                self.key_esc_logic();
+                self.current_side.text_area = TextArea::default();
+            }
+            KeyCode::Esc => {
+                self.key_esc_logic();
+                self.current_side.text_area = TextArea::default();
+            }
+            KeyCode::Char(c) => {
+                self.current_side.text_area.insert_char(c);
+            }
+            KeyCode::Backspace => {
+                self.current_side.text_area.delete_char();
+            }
+            KeyCode::Enter => {
+                self.current_side.text_area.insert_char('\n');
+            }
+            KeyCode::Right =>{
+                self.current_side.text_area.move_cursor(CursorMove::Forward)
+            }
+            KeyCode::Left =>{
+                self.current_side.text_area.move_cursor(CursorMove::Back)
+            }
+            KeyCode::Up =>{
+                self.current_side.text_area.move_cursor(CursorMove::Up)
+            }
+            KeyCode::Down =>{
+                self.current_side.text_area.move_cursor(CursorMove::Down)
+            }
+            _ => {}
+        }
+        self.current_side.refresh_entries = false;
+    }
+    fn user_input_handling(&mut self, key : KeyEvent, stream : &TcpStream, menu_items : Vec<(MenuOption, ListItem)>, view_height : usize, view_width : usize) {
         match self.current_side.current_app_state {
             AppStates::Browsing => {
-                match key.code {
-                    KeyCode::Up => {
-                        self.key_up_down_logic(KeyCode::Up);
-                    }
-                    KeyCode::Down => {
-                        self.key_up_down_logic(KeyCode::Down);
-                    }
-                    KeyCode::Right => {
-                        self.key_right_logic(stream);
-                    }
-                    KeyCode::Left => {
-                        self.key_left_logic(stream);
-                    }
-                    KeyCode::Esc => {
-                        self.current_side.terminate = true;
-                    }
-                    KeyCode::Char('f') => {
-                        self.key_f_logic();
-                    }
-                    KeyCode::Char('x') => {
-                        self.switch_side();
-                    }
-                    KeyCode::Enter => {
-                        if let Some(selected_index) = self.current_side.selected_menu_row.selected() {
-                            if let Some((option, _)) = menu_items.get(selected_index) {
-                                self.key_enter_browsing_logic(stream, option);
-                            }
-                        }
-                    }
-                    _ => { self.current_side.refresh_entries = false; }
-                }
+                self.browsing_key_logic(key, stream, menu_items);
             }
             AppStates::Creating => {
-                match key.code {
-                    KeyCode::Enter => {
-                        if let Some((option, _)) = menu_items.get(self.current_side.selected_menu_row.selected().unwrap()) {
-                            let mut res = Result::Err("e".to_string());
-                            match option {
-                                MenuOption::NewDir => {
-                                    let new_dir = |path: &str| fs::create_dir(path);
-                                    res = self.handle_input_field_operations(new_dir, stream);
-                                }
-                                MenuOption::DeleteDir => {
-                                    let del_dir = |path: &str| fs::remove_dir(path);
-                                    res = self.handle_input_field_operations(del_dir, stream);
-                                }
-                                MenuOption::NewFile => {
-                                    let new_file = |path: &str| fs::File::create(path);
-                                    res = self.handle_input_field_operations(new_file, stream);
-                                }
-                                MenuOption::DeleteFile => {
-                                    let del_file = |path: &str| fs::remove_file(path);
-                                    res = self.handle_input_field_operations(del_file, stream);
-                                }
-                                MenuOption::ViewFile => {
-                                    self.view_file(stream);
-                                }
-                                _ => {}
-                            }
-                            if res == Ok(()) {
-                                self.current_side.input_field.clear();
-                            }
-                        }
-                    }
-                    _ => {
-                        self.handle_input_field_edit_keys(key.code);
-                        self.current_side.refresh_entries = false;
-                    }
-                }
+                self.creating_key_logic(key, stream, menu_items);
             }
             AppStates::Viewing => {
-                match key.code {
-                    KeyCode::Up => {
-                        if self.current_side.scroll_offset > 0 {
-                            self.current_side.scroll_offset -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        // Limit the down scroll
-                        if self.current_side.file_lines_count >= self.current_side.scroll_offset as usize + view_height {
-                            self.current_side.scroll_offset += 1;
-                        }
-                    }
-                    KeyCode::Esc => {
-                        self.current_side.input_field.clear();
-                        self.current_side.wrong_input = false;
-                        self.current_side.file_lines_count = 0;
-                        self.current_side.scroll_offset = 0;
-                        // Switch back to browsing
-                        self.current_side.current_app_state = AppStates::Browsing;
-                    }
-                    KeyCode::Char('x') => {
-                        self.switch_side();
-                    }
-                    _ => {}
-                }
-                self.current_side.refresh_entries = false;
+                self.viewing_key_logic(key,view_height);
+            }
+            AppStates::Editing => {
+                self.editing_key_logic(key,stream);
             }
         }
     }
@@ -479,6 +606,7 @@ impl TwoSides {
 
         //let mut scroll_offset = 0;
         let mut view_height: Vec<usize> = Vec::default();
+        let mut view_width: Vec<usize> = Vec::default();
 
         //Menu
         let menu_items: Vec<(MenuOption, ListItem)> = create_menu_items();
@@ -513,7 +641,7 @@ impl TwoSides {
                 let mut view_layout: Vec<Rc<[Rect]>> = Vec::default();//Layout::default().split(Default::default());
                 let mut input_layout: Vec<Rc<[Rect]>> = Vec::default();//Layout::default().split(Default::default());
                 // Create layouts - layouts need to be recreated every loop cause of the possibility of window resize
-                create_layouts(f, &mut basic_layout, &mut view_layout, &mut input_layout, &mut path_layout, &mut view_height);
+                create_layouts(f, &mut basic_layout, &mut view_layout, &mut input_layout, &mut path_layout, &mut view_height, &mut view_width);
                 self.draw_layouts(f, &mut basic_layout,&mut view_layout, &mut input_layout, &mut path_layout, menu.clone());
             })?;
 
@@ -523,7 +651,7 @@ impl TwoSides {
                 if event::poll(Duration::from_millis(100))? {
                     if let event::Event::Key(key) = event::read()? {
                         // User input handling
-                        self.user_input_handling(key, stream, menu_items.clone(), view_height[self.current_side_index]);
+                        self.user_input_handling(key, stream, menu_items.clone(), view_height[self.current_side_index], view_width[self.current_side_index]);
                         break;
                     }
                 }
@@ -572,6 +700,7 @@ enum AppStates {
     Browsing,
     Creating,
     Viewing,
+    Editing
 }
 // Enum to track which Menu item is currently selected
 #[derive(Clone, Copy)]
@@ -627,35 +756,9 @@ impl MenuOption {
         ]
     }
 }
-fn main() {
-    match TcpStream::connect("127.0.0.1:7878") {
-        Ok(stream) => {
-            println!("Connected to server!");
 
-            let terminal = ratatui::init();
+//Functions for server request and layout handling
 
-            let initial_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1";
-            let second_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1/PvR";
-
-            let entries_info : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, initial_path, Some(0)).into();
-
-            let entries_info_2 : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, second_path, Some(0)).into();
-
-            let left_side = ClientLogic::new_left(entries_info.clone(), initial_path.to_string());
-            let right_side = ClientLogic::new_right(entries_info_2.clone(), second_path.to_string());
-
-            let mut client_logic = TwoSides::new(left_side, right_side);
-
-            let _ = client_logic.run(terminal,&stream);
-            //let _app_result = run(terminal, entries_info, initial_path.to_string(), &stream);
-
-            ratatui::restore();
-        }
-        Err(e) => {
-            eprintln!("Failed to connect to server: {}", e);
-        }
-    }
-}
 fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpStream, path: &str, index: Option<i32>) -> StringVec {
     let request = match request_type{
         RequestType::GET_DIR => {
@@ -700,15 +803,20 @@ fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpS
             StringVec::VecVecString(from_str::<Vec<Vec<String>>>(&response).unwrap())
         }
         RequestType::GET_FILE => {
-            let response: FileResponse = from_str(&response).unwrap();
+            let response: Result<FileResponse, _> = from_str(&response);
 
-            //Handle if the server couldn't open/read file
-            if response.success {
-                StringVec::VecString(Some(response.message))
-            } else {
-                StringVec::VecString(None)
+            match response {
+                //Handle if the server couldn't open/read file
+                Ok(response) if response.success => StringVec::VecString(Some(response.message)),
+                _ => StringVec::VecString(None),
             }
         }
+    }
+}
+fn send_file_to_server(mut stream: &TcpStream, path: &str, file_content: String){
+    let request = format!("SAVE_FILE {};{}", path, file_content);
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("Failed to send request: {}", e);
     }
 }
 fn create_menu_items<'a>() -> Vec<(MenuOption, ListItem<'a>)> {
@@ -719,7 +827,7 @@ fn create_menu_items<'a>() -> Vec<(MenuOption, ListItem<'a>)> {
     output
 }
 fn create_layouts(f: &mut Frame, mut basic_layout: &mut Vec<Rc<[Rect]>>, mut view_layout: &mut Vec<Rc<[Rect]>>, mut input_layout: &mut Vec<Rc<[Rect]>>, mut path_layout: &mut Vec<Rc<[Rect]>>,
-                  mut view_height: &mut Vec<usize>) {
+                  mut view_height: &mut Vec<usize>, mut view_width: &mut Vec<usize>) {
     // Main split to two sides - left and right
     let left_right_layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -740,12 +848,12 @@ fn create_layouts(f: &mut Frame, mut basic_layout: &mut Vec<Rc<[Rect]>>, mut vie
             .split(left_right_layout[i]);
         // Split layout vertically - 10% for path, 90% for data
         path_layout.push(Layout::default()
-                              .direction(Direction::Vertical)
-                              .constraints([
-                                  Constraint::Percentage(10),
-                                  Constraint::Percentage(90),
-                              ])
-                              .split(grid_layout[0]));
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(10),
+                Constraint::Percentage(90),
+            ])
+            .split(grid_layout[0]));
 
         // Split layout horizontally - for each data attribute one column
         basic_layout.push(Layout::default()
@@ -765,12 +873,13 @@ fn create_layouts(f: &mut Frame, mut basic_layout: &mut Vec<Rc<[Rect]>>, mut vie
         view_layout.push(Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(15),
-                Constraint::Percentage(85),
+                Constraint::Percentage(20),
+                Constraint::Percentage(80),
             ])
             .split(grid_layout[0]));
         // Save height for file scrolling
         view_height.push(view_layout[i][1].height as usize);
+        view_width.push(view_layout[i][1].width as usize);
 
         // Layout for user input field
         input_layout.push(Layout::default()
@@ -781,72 +890,31 @@ fn create_layouts(f: &mut Frame, mut basic_layout: &mut Vec<Rc<[Rect]>>, mut vie
             .split(grid_layout[1]));
     }
 }
+fn main() {
+    match TcpStream::connect("127.0.0.1:7878") {
+        Ok(stream) => {
+            println!("Connected to server!");
 
-#[derive(Clone)]
-struct ClientLogic{
-    selected_content_row: ListState,
-    selected_menu_row: ListState,
-    current_entries : Vec<Vec<String>>,
-    current_path : String,
-    cache : HashMap<String, Vec<Vec<String>>>,
-    cached_flag : bool,
-    start : Instant,
-    refresh_entries : bool,
-    terminate : bool,
-    input_field : String,
-    current_app_state : AppStates,
-    wrong_input : bool,
-    menu_items_len: usize,
-    current_menu_option_index : i32,
-    current_menu_item_chosen: MenuOption,
-    file_content : String,
-    file_lines_count : usize,
-    scroll_offset : i32,
-}
-impl ClientLogic {
-    fn new_left(current_entries : Vec<Vec<String>>, current_path : String) -> Self{
-        ClientLogic {
-            selected_content_row: ListState::default(),
-            selected_menu_row: ListState::default(),
-            current_entries,
-            current_path,
-            cache: Default::default(),
-            cached_flag : false,
-            start : Instant::now(),
-            refresh_entries : false,
-            terminate : false,
-            input_field : String::new(),
-            current_app_state : AppStates::Browsing,
-            wrong_input : false,
-            menu_items_len: 0,
-            current_menu_option_index : 0,
-            current_menu_item_chosen : MenuOption::BasicInfo,
-            file_content : String::new(),
-            file_lines_count : 0,
-            scroll_offset : 0,
+            let terminal = ratatui::init();
+
+            let initial_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1";
+            let second_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1/PvR";
+
+            let entries_info : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, initial_path, Some(0)).into();
+            let entries_info_2 : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, second_path, Some(0)).into();
+
+            let left_side = ClientLogic::new(entries_info.clone(), initial_path.to_string());
+            let right_side = ClientLogic::new(entries_info_2.clone(), second_path.to_string());
+
+            let mut client_logic = TwoSides::new(left_side, right_side);
+
+            let _ = client_logic.run(terminal,&stream);
+            //let _app_result = run(terminal, entries_info, initial_path.to_string(), &stream);
+
+            ratatui::restore();
+        }
+        Err(e) => {
+            eprintln!("Failed to connect to server: {}", e);
         }
     }
-    fn new_right(current_entries : Vec<Vec<String>>, current_path : String) -> Self{
-        ClientLogic {
-            selected_content_row: ListState::default(),
-            selected_menu_row: ListState::default(),
-            current_entries,
-            current_path,
-            cache: Default::default(),
-            cached_flag : false,
-            start : Instant::now(),
-            refresh_entries : false,
-            terminate : false,
-            input_field : String::new(),
-            current_app_state : AppStates::Browsing,
-            wrong_input : false,
-            menu_items_len: 0,
-            current_menu_option_index : 0,
-            current_menu_item_chosen : MenuOption::BasicInfo,
-            file_content : String::new(),
-            file_lines_count : 0,
-            scroll_offset : 0,
-        }
-    }
-
 }
