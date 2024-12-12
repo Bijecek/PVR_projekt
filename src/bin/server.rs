@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::{fs, thread};
+use std::borrow::Cow;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::time::{SystemTime};
@@ -35,8 +36,6 @@ fn main() -> std::io::Result<()> {
 }
 fn handle_client(mut stream: TcpStream) {
     println!("New client connected: {}", stream.peer_addr().unwrap());
-
-
     let mut buffer = [0u8; 1000];
     loop {
         println!("Waiting for client");
@@ -47,10 +46,12 @@ fn handle_client(mut stream: TcpStream) {
                 }
                 let request = String::from_utf8_lossy(&buffer[..size]);
                 eprintln!("Request: {}", request);
+
                 if request.starts_with("GET_DIR") {
                     let path_and_visual_index = request.trim().strip_prefix("GET_DIR ").unwrap();
 
-                    let split_index = path_and_visual_index.rfind('-').unwrap();
+                    // TODO REFACTOR TO THIS let parts: Vec<&str> = path_and_visual_index.split('|').collect();
+                    let split_index = path_and_visual_index.rfind('|').unwrap();
                     let path = &path_and_visual_index[..split_index];
                     let visual_index = &path_and_visual_index[split_index + 1..].parse::<i32>().unwrap();
 
@@ -65,11 +66,9 @@ fn handle_client(mut stream: TcpStream) {
                     }
                 }
                 else if request.starts_with("GET_FILE"){
-                    let path_and_visual_index = request.trim().strip_prefix("GET_FILE ").unwrap();
-                    // Remove any trailing \0 character
-                    let path = path_and_visual_index.trim_end_matches('\0');
+                    let path = parse_path("GET_FILE ".to_string(),request);
 
-                    let response = match read_file_content(path){
+                    let response = match read_file_content(path.as_str()){
                         Ok(content) => FileResponse {
                             success: true,
                             message: content,
@@ -84,6 +83,26 @@ fn handle_client(mut stream: TcpStream) {
                         eprintln!("Failed to send response: {}", e);
                     }
                 }
+                else if request.starts_with("FILTER_DIR"){
+                    let path_and_visual_index = request.trim().strip_prefix("FILTER_DIR ").unwrap();
+                    let parts: Vec<String> = path_and_visual_index.split('|')
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    let path = &parts[0];
+                    let visual_index = &parts[1].parse::<i32>().unwrap();
+                    let filter_keyword = &parts[2];
+
+                    let dir_info = load_and_parse_dir(path, *visual_index);
+                    let filtered_dir_info = filter_dir(&dir_info, filter_keyword);
+
+                    let response = serde_json::to_string(&filtered_dir_info).unwrap();
+
+                    if let Err(e) = stream.write_all(response.as_bytes()) {
+                        eprintln!("Failed to send response: {}", e);
+                    }
+
+                }
                 else if request.starts_with("SAVE_FILE"){
                     let path_and_visual_index = request.trim().strip_prefix("SAVE_FILE ").unwrap();
 
@@ -94,6 +113,115 @@ fn handle_client(mut stream: TcpStream) {
                         eprintln!("Failed to save file: {}", e);
                     }
                 }
+                else if request.starts_with("CREATE_DIR"){
+                    let path = parse_path("CREATE_DIR ".to_string(),request);
+
+                    if let Err(e) = fs::create_dir(path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+                else if request.starts_with("REMOVE_DIR"){
+                    let path = parse_path("REMOVE_DIR ".to_string(),request);
+
+                    if let Err(e) = fs::remove_dir(path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+                else if request.starts_with("CREATE_FILE"){
+                    let path = parse_path("CREATE_FILE ".to_string(),request);
+
+                    if let Err(e) = fs::File::create(path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+                else if request.starts_with("REMOVE_FILE"){
+                    let path = parse_path("REMOVE_FILE ".to_string(),request);
+
+                    if let Err(e) = fs::remove_file(path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+                else if request.starts_with("MOVE_FILE"){
+                    let path_and_visual_index = request.trim().strip_prefix("MOVE_FILE ").unwrap();
+
+                    // Split to source | destination
+                    let split_source_index = path_and_visual_index.rfind('|').unwrap();
+                    let source_path = &path_and_visual_index[..split_source_index];
+
+                    //Extract the file name
+                    let split_filename_index = source_path.rfind('/').unwrap();
+                    let file_name = &source_path[split_filename_index + 1..];
+
+                    let destination_path = &path_and_visual_index[split_source_index + 1..];
+                    // Add the filename to destination path
+                    let full_destination_path = format!("{}/{}",destination_path,file_name);
+
+                    if let Err(e) = fs::rename(source_path, full_destination_path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+                else if request.starts_with("RENAME_FILE"){
+                    let path_and_visual_index = request.trim().strip_prefix("RENAME_FILE ").unwrap();
+
+                    // Split to source | destination
+                    let split_source_index = path_and_visual_index.rfind('|').unwrap();
+                    let source_path = &path_and_visual_index[..split_source_index];
+
+                    //Extract the file name
+                    let split_filename_index = source_path.rfind('/').unwrap();
+                    let source_path_without_filename = &source_path[..split_filename_index];
+
+                    let new_filename = &path_and_visual_index[split_source_index + 1..];
+                    // Add the filename to destination path
+                    let full_destination_path = format!("{}/{}",source_path_without_filename,new_filename);
+
+                    if let Err(e) = fs::rename(source_path, full_destination_path){
+                        if let Err(e) = stream.write_all(b"Error") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                    else{
+                        if let Err(e) = stream.write_all(b"Ok") {
+                            eprintln!("Failed to send response: {}", e);
+                        }
+                    }
+                }
+
             }
             Err(e) => {
                 eprintln!("Failed to read from client: {}", e);
@@ -232,4 +360,16 @@ fn update_file_content(path: &str, file_content : &str) -> Result<String, String
             Ok("".to_string())
         }
     }
+}
+fn parse_path(prefix: String, request : Cow<str>) -> String{
+    let path_and_visual_index = request.trim().strip_prefix(prefix.as_str()).unwrap();
+    // Remove any trailing \0 character
+    path_and_visual_index.trim_end_matches('\0').to_string()
+}
+fn filter_dir(dir_info : &Vec<Vec<String>>, filter_keyword : &String) -> Vec<Vec<String>>{
+    // Get all that contain the filter_keyword
+    dir_info.into_iter().filter(|vec|
+        vec.iter().any(|s| s.contains(filter_keyword)))
+        .cloned()
+        .collect()
 }

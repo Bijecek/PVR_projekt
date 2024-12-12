@@ -32,6 +32,9 @@ struct ClientLogic<'a>{
     refresh_entries : bool,
     terminate : bool,
     input_field : String,
+    input_field_rename : String,
+    filter_active: bool,
+    current_input_field : i32,
     current_app_state : AppStates,
     wrong_input : bool,
     menu_items_len: usize,
@@ -56,6 +59,9 @@ impl <'a>ClientLogic<'a> {
             refresh_entries : false,
             terminate : false,
             input_field : String::new(),
+            input_field_rename : String::new(),
+            filter_active : false,
+            current_input_field : 0,
             current_app_state : AppStates::Browsing,
             wrong_input : false,
             menu_items_len: 0,
@@ -84,20 +90,26 @@ impl <'a>TwoSides<'a> {
         }
     }
     fn key_up(current_state: &mut ListState, length: usize){
-        // Circular behavior
-        if Some(current_state.selected().unwrap()) == Option::from(0) {
-            // select_last was not working correctly
-            current_state.select(Some(length - 1));
-        } else {
-            current_state.select_previous();
+        // Prevent going up on empty entries
+        if length != 0 {
+            // Circular behavior
+            if Some(current_state.selected().unwrap()) == Option::from(0) {
+                // select_last was not working correctly
+                current_state.select(Some(length - 1));
+            } else {
+                current_state.select_previous();
+            }
         }
     }
     fn key_down(current_state: &mut ListState, length: usize){
-        // Circular behavior
-        if Some(current_state.selected().unwrap()) == Option::from(length - 1) {
-            current_state.select(Some(0));
-        } else {
-            current_state.select_next();
+        // Prevent going down on empty entries
+        if length != 0 {
+            // Circular behavior
+            if Some(current_state.selected().unwrap()) == Option::from(length - 1) {
+                current_state.select(Some(0));
+            } else {
+                current_state.select_next();
+            }
         }
     }
     fn key_up_down_logic(&mut self, key_pressed : KeyCode) {
@@ -109,19 +121,20 @@ impl <'a>TwoSides<'a> {
             (&mut self.current_side.selected_content_row, length)
         };
 
-        match key_pressed{
+        match key_pressed {
             KeyCode::Up => {
                 Self::key_up(state, length);
             }
-            KeyCode::Down =>{
+            KeyCode::Down => {
                 Self::key_down(state, length);
             }
             _ => {}
         }
+
         self.current_side.refresh_entries = false;
     }
     fn key_right_logic(&mut self, stream: &TcpStream){
-        if !self.current_side.selected_content_row.selected().is_none() {
+        if self.current_side.selected_menu_row.selected().is_none() && !self.current_side.current_entries.is_empty() {
             let selected_index = self.current_side.selected_content_row.selected().unwrap();
             let selected_row = self.current_side.current_entries.get(selected_index).unwrap();
 
@@ -138,7 +151,7 @@ impl <'a>TwoSides<'a> {
                         new_entries = entries.clone();
                         self.current_side.cached_flag = true;
                     } else {
-                        new_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, new_path.as_str(), Some(self.current_side.current_menu_option_index)).into();
+                        new_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, new_path.as_str(), Some(self.current_side.current_menu_option_index), None).into();
                         self.current_side.cache.insert(new_path.clone(), new_entries.clone());
                         self.current_side.cached_flag = false;
                     }
@@ -149,11 +162,13 @@ impl <'a>TwoSides<'a> {
                     self.current_side.selected_content_row.select(Some(0));
                 }
             }
-            self.current_side.refresh_entries = false;
+            self.current_side.filter_active = false;
+            self.current_side.input_field.clear();
         }
+        self.current_side.refresh_entries = false;
     }
     fn key_left_logic(&mut self, stream : &TcpStream){
-        if !self.current_side.selected_content_row.selected().is_none() {
+        if self.current_side.selected_menu_row.selected().is_none() {
             if let Some(position) = self.current_side.current_path.rfind('/') {
                 self.current_side.current_path.truncate(position);
 
@@ -162,13 +177,16 @@ impl <'a>TwoSides<'a> {
                     self.current_side.current_entries = entries.clone();
                     self.current_side.cached_flag = true;
                 } else {
-                    self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(), Some(self.current_side.current_menu_option_index)).into();
+                    self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(),
+                                                                                         Some(self.current_side.current_menu_option_index), None).into();
                     self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
                     self.current_side.cached_flag = false;
                 }
 
                 self.current_side.selected_content_row.select(Some(0));
             }
+            self.current_side.filter_active = false;
+            self.current_side.input_field.clear();
         }
         self.current_side.refresh_entries = false;
     }
@@ -194,12 +212,13 @@ impl <'a>TwoSides<'a> {
                 // Reset "cache"
                 self.current_side.cache = HashMap::new();
                 // Load new entries - different attributes
-                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(), Some(self.current_side.current_menu_option_index)).into();
+                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(),
+                                                                                     Some(self.current_side.current_menu_option_index), None).into();
                 self.current_side.refresh_entries = false;
 
                 self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
             }
-            MenuOption::NewDir | MenuOption::DeleteDir | MenuOption::NewFile | MenuOption::DeleteFile | MenuOption::ViewFile => {
+            MenuOption::NewDir | MenuOption::DeleteDir | MenuOption::NewFile | MenuOption::DeleteFile | MenuOption::ViewFile | MenuOption::MoveFile | MenuOption::RenameFile | MenuOption::Filter => {
                 self.current_side.current_menu_item_chosen = *option;
                 // Change the app state to make difference between controls
                 self.current_side.current_app_state = AppStates::Creating;
@@ -211,15 +230,25 @@ impl <'a>TwoSides<'a> {
         }
     }
     fn handle_input_field_edit_keys(&mut self, key_pressed : KeyCode){
+        let current_input_field;
+        // Handle two input fields logic
+        if self.current_side.current_input_field == 0{
+            current_input_field = &mut self.current_side.input_field;
+        }
+        else{
+            current_input_field = &mut self.current_side.input_field_rename;
+        }
         match key_pressed{
             KeyCode::Char(c) => {
-                self.current_side.input_field.push(c);
+                current_input_field.push(c);
             }
             KeyCode::Backspace =>{
-                self.current_side.input_field.pop();
+                current_input_field.pop();
             }
             KeyCode::Esc =>{
                 self.current_side.input_field.clear();
+                self.current_side.input_field_rename.clear();
+                self.current_side.current_input_field = 0;
                 // Switch back to browsing
                 self.current_side.current_app_state = AppStates::Browsing;
             }
@@ -227,23 +256,39 @@ impl <'a>TwoSides<'a> {
         }
         self.current_side.wrong_input = false;
     }
-    fn handle_input_field_operations<F, T>(&mut self, operation: F, stream: &TcpStream) -> Result<(), String>
-    where
-        F: FnOnce(&str) -> Result<T, io::Error>,
-    {
+    fn handle_input_field_operations2(&mut self, request_type: RequestType, stream: &TcpStream) -> Result<(), String> {
         if !self.current_side.input_field.is_empty() {
-            let new_dir_path = format!("{}/{}", self.current_side.current_path, self.current_side.input_field);
+            let new_dir_path;
+            match request_type{
+                RequestType::MOVE_FILE =>{
+                    // Format current path and path from second "window"
+                    new_dir_path = format!("{}/{}|{}", self.current_side.current_path, self.current_side.input_field, self.both_sides[(self.current_side_index+1)%2].current_path);
+                }
+                RequestType::RENAME_FILE =>{
+                    if self.current_side.input_field_rename.is_empty(){
+                        self.current_side.wrong_input = true;
+                        return Err("Rename field is missing.".to_string())
+                    }
+                    new_dir_path = format!("{}/{}|{}", self.current_side.current_path, self.current_side.input_field, self.current_side.input_field_rename);
+                }
+                _ => {
+                    new_dir_path = format!("{}/{}", self.current_side.current_path, self.current_side.input_field);
+                }
+            }
+            send_request_to_server(stream, request_type, new_dir_path.as_str(), String::new());
 
-            if let Err(_err) = operation(&new_dir_path) {
-                self.current_side.wrong_input = true;
-                Err("Some error.".to_string())
-            } else {
-                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(), Some(self.current_side.current_menu_option_index)).into();
+            if let Ok(()) = wait_for_server_response(stream){
+                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(),
+                                                                                     Some(self.current_side.current_menu_option_index), None).into();
                 self.current_side.cache.insert(self.current_side.current_path.to_string(), self.current_side.current_entries.clone());
 
                 self.current_side.current_app_state = AppStates::Browsing;
                 self.current_side.wrong_input = false;
                 Ok(())
+            }
+            else{
+                self.current_side.wrong_input = true;
+                Err("Input field is wrong.".to_string())
             }
         } else {
             self.current_side.wrong_input = true;
@@ -294,6 +339,9 @@ impl <'a>TwoSides<'a> {
                         MenuOption::NewFile => "Enter new file name: ".to_string(),
                         MenuOption::DeleteFile => "Enter file name to delete: ".to_string(),
                         MenuOption::ViewFile => "Enter file to view: ".to_string(),
+                        MenuOption::MoveFile => "Enter file to move: ".to_string(),
+                        MenuOption::RenameFile => "Enter file to rename: ".to_string(),
+                        MenuOption::Filter => "Enter keyword to filter: ".to_string(),
                         _ => { "".to_string() }
                     };
 
@@ -307,15 +355,36 @@ impl <'a>TwoSides<'a> {
 
                             self.transform_and_render(f, basic_layout[i].clone(), path_layout[i].clone(), menu_option.get_visual_titles(title.clone()), i);
 
+                            // Filtering logic
+                            if let AppStates::Browsing = self.current_side.current_app_state {
+                                if self.current_side.filter_active {
+                                    let mut input_box = Paragraph::new(self.current_side.input_field.clone())
+                                        .block(Block::default().borders(Borders::ALL).title(text_for_prompt.clone()))
+                                        .style(Style::default().fg(Color::White));
+                                    input_box = input_box.style(Style::default().fg(Color::White).bg(Color::Green));
+                                    f.render_widget(input_box, input_layout[i][0]);
+                                }
+                            }
+
                             // If we are creating add input_box to layout
                             if let AppStates::Creating = self.current_side.current_app_state {
                                 let mut input_box = Paragraph::new(self.current_side.input_field.clone())
                                     .block(Block::default().borders(Borders::ALL).title(text_for_prompt.clone()))
                                     .style(Style::default().fg(Color::White));
+
+                                // If we are renaming, add another input_box
+                                if let MenuOption::RenameFile = self.current_side.current_menu_item_chosen{
+                                    let mut input_box = Paragraph::new(self.current_side.input_field_rename.clone())
+                                        .block(Block::default().borders(Borders::ALL).title("Enter new filename: "))
+                                        .style(Style::default().fg(Color::White));
+                                    f.render_widget(input_box, input_layout[i][1]);
+                                }
+
                                 // Notify user - change background if wrong input
                                 if self.current_side.wrong_input {
                                     input_box = input_box.style(Style::default().fg(Color::White).bg(Color::Red));
                                 }
+
                                 f.render_widget(input_box, input_layout[i][0]);
                             }
                         }
@@ -356,7 +425,7 @@ impl <'a>TwoSides<'a> {
             self.current_side_index = 1;
             self.current_side = self.both_sides[1].clone();
 
-            self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
+            //self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
 
             if self.current_side.menu_items_len == 0 {
                 //Initialize some item
@@ -379,11 +448,12 @@ impl <'a>TwoSides<'a> {
             self.current_side_index = 0;
             self.current_side = self.both_sides[0].clone();
 
-            self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
+            //self.current_side.cache.insert(self.current_side.current_path.clone(), self.current_side.current_entries.clone());
         }
     }
     fn key_esc_logic(&mut self){
         self.current_side.input_field.clear();
+        self.current_side.input_field_rename.clear();
         self.current_side.wrong_input = false;
         self.current_side.file_lines_count = 0;
         self.current_side.scroll_offset = 0;
@@ -427,32 +497,62 @@ impl <'a>TwoSides<'a> {
     fn creating_key_logic(&mut self, key : KeyEvent, stream : &TcpStream, menu_items : Vec<(MenuOption, ListItem)>){
         match key.code {
             KeyCode::Enter => {
+                //TODO REFACTOR THIS - can use self.current_side.current_menu_item_chosen
                 if let Some((option, _)) = menu_items.get(self.current_side.selected_menu_row.selected().unwrap()) {
                     let mut res = Result::Err("e".to_string());
                     match option {
                         MenuOption::NewDir => {
-                            let new_dir = |path: &str| fs::create_dir(path);
-                            res = self.handle_input_field_operations(new_dir, stream);
+                            res = self.handle_input_field_operations2(RequestType::CREATE_DIR, stream);
                         }
                         MenuOption::DeleteDir => {
-                            let del_dir = |path: &str| fs::remove_dir(path);
-                            res = self.handle_input_field_operations(del_dir, stream);
+                            res = self.handle_input_field_operations2(RequestType::REMOVE_DIR, stream);
+                        }
+                        MenuOption::Filter =>{
+                            // Load new entries - different attributes
+                            self.current_side.current_entries = get_specific_content_from_server(RequestType::FILTER, stream, self.current_side.current_path.as_str(),
+                                                                                                 Some(self.current_side.current_menu_option_index), Some(self.current_side.input_field.clone())).into();
+                            self.current_side.refresh_entries = false;
+
+                            res = Ok(());
+                            self.current_side.current_app_state = AppStates::Browsing;
+                            // Save the state - will have green background
+                            self.current_side.filter_active = true;
+                            // Do not erase the input field
+                            return;
                         }
                         MenuOption::NewFile => {
-                            let new_file = |path: &str| fs::File::create(path);
-                            res = self.handle_input_field_operations(new_file, stream);
+                            res = self.handle_input_field_operations2(RequestType::CREATE_FILE, stream);
                         }
                         MenuOption::DeleteFile => {
-                            let del_file = |path: &str| fs::remove_file(path);
-                            res = self.handle_input_field_operations(del_file, stream);
+                            res = self.handle_input_field_operations2(RequestType::REMOVE_FILE, stream);
+                        }
+                        MenuOption::MoveFile => {
+                            res = self.handle_input_field_operations2(RequestType::MOVE_FILE, stream);
+                        }
+                        MenuOption::RenameFile => {
+                            res = self.handle_input_field_operations2(RequestType::RENAME_FILE, stream);
                         }
                         MenuOption::ViewFile => {
                             self.view_file(stream);
                         }
+
                         _ => {}
                     }
                     if res == Ok(()) {
                         self.current_side.input_field.clear();
+                        self.current_side.input_field_rename.clear();
+                        self.current_side.current_input_field = 0;
+                    }
+                }
+            }
+            // Tab is used to switch between text_fields when renaming file
+            KeyCode::Tab => {
+                if let MenuOption::RenameFile = self.current_side.current_menu_item_chosen{
+                    if self.current_side.current_input_field == 0 {
+                        self.current_side.current_input_field = 1;
+                    }
+                    else{
+                        self.current_side.current_input_field = 0;
                     }
                 }
             }
@@ -506,7 +606,7 @@ impl <'a>TwoSides<'a> {
     fn editing_key_logic(&mut self, key : KeyEvent, stream : &TcpStream){
         match key.code {
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 's' => {
-                send_file_to_server(stream, format!{"{}/{}",self.current_side.current_path.as_str(), self.current_side.input_field}.as_str(), self.current_side.text_area.lines().join("\n"));
+                send_request_to_server(stream, RequestType::SAVE_FILE, format!{"{}/{}", self.current_side.current_path.as_str(), self.current_side.input_field}.as_str(), self.current_side.text_area.lines().join("\n"));
 
                 self.key_esc_logic();
                 self.current_side.text_area = TextArea::default();
@@ -559,7 +659,7 @@ impl <'a>TwoSides<'a> {
     fn view_file(&mut self, stream : &TcpStream){
         let new_path = format!("{}/{}", self.current_side.current_path, self.current_side.input_field);
 
-        let option_content: Option<String> = get_specific_content_from_server(RequestType::GET_FILE, stream, new_path.as_str(), None).into();
+        let option_content: Option<String> = get_specific_content_from_server(RequestType::GET_FILE, stream, new_path.as_str(), None, None).into();
         if let Some(content) = option_content {
             self.current_side.file_content = content.clone();
             self.current_side.file_lines_count = content.split('\n').count();
@@ -623,8 +723,9 @@ impl <'a>TwoSides<'a> {
                 break;
             }
             // No input in the last 50 seconds -> refresh entries
-            if self.current_side.refresh_entries {
-                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(), Some(self.current_side.current_menu_option_index)).into();
+            if self.current_side.refresh_entries && !self.current_side.filter_active {
+                self.current_side.current_entries = get_specific_content_from_server(RequestType::GET_DIR, stream, self.current_side.current_path.as_str(),
+                                                                                     Some(self.current_side.current_menu_option_index), None).into();
 
                 // Update hashmap if different entries found
                 if let Some(value) = self.current_side.cache.get(&self.current_side.current_path) {
@@ -663,9 +764,18 @@ impl <'a>TwoSides<'a> {
     }
 }
 // Enum for different type of requests for server
+#[derive(Debug)]
 enum RequestType {
     GET_DIR,
     GET_FILE,
+    FILTER,
+    REMOVE_DIR,
+    CREATE_DIR,
+    REMOVE_FILE,
+    CREATE_FILE,
+    SAVE_FILE,
+    MOVE_FILE,
+    RENAME_FILE
 }
 // Enum for handling different datatypes from server response
 enum StringVec {
@@ -707,11 +817,14 @@ enum AppStates {
 enum MenuOption {
     BasicInfo,
     MoreInfo,
+    Filter,
     NewDir,
     DeleteDir,
     NewFile,
     DeleteFile,
     ViewFile,
+    MoveFile,
+    RenameFile,
     Exit,
 }
 impl MenuOption {
@@ -719,11 +832,14 @@ impl MenuOption {
         match self {
             MenuOption::BasicInfo => "Basic information".to_string(),
             MenuOption::MoreInfo => "Extended information".to_string(),
+            MenuOption::Filter => "Filter entries".to_string(),
             MenuOption::NewDir => "Create directory".to_string(),
             MenuOption::DeleteDir => "Delete directory".to_string(),
             MenuOption::NewFile => "Create file".to_string(),
             MenuOption::DeleteFile => "Delete file".to_string(),
             MenuOption::ViewFile => "View file".to_string(),
+            MenuOption::MoveFile => "Move file".to_string(),
+            MenuOption::RenameFile => "Rename file".to_string(),
             MenuOption::Exit => "Exit".to_string(),
         }
     }
@@ -747,11 +863,14 @@ impl MenuOption {
         &[
             MenuOption::BasicInfo,
             MenuOption::MoreInfo,
+            MenuOption::Filter,
             MenuOption::NewDir,
             MenuOption::DeleteDir,
             MenuOption::NewFile,
             MenuOption::DeleteFile,
             MenuOption::ViewFile,
+            MenuOption::MoveFile,
+            MenuOption::RenameFile,
             MenuOption::Exit,
         ]
     }
@@ -759,14 +878,23 @@ impl MenuOption {
 
 //Functions for server request and layout handling
 
-fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpStream, path: &str, index: Option<i32>) -> StringVec {
+fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpStream, path: &str, index: Option<i32>, filter_keyword : Option<String>) -> StringVec {
     let request = match request_type{
         RequestType::GET_DIR => {
-            format!("GET_DIR {}-{}", path, index.unwrap())
+            format!("GET_DIR {}|{}", path, index.unwrap())
         }
         RequestType::GET_FILE => {
             format!("GET_FILE {}", path)
         }
+        RequestType::FILTER =>{
+            if filter_keyword.is_none() {
+                format!("GET_DIR {}|{}", path, index.unwrap())
+            }
+            else{
+                format!("FILTER_DIR {}|{}|{}", path, index.unwrap(), filter_keyword.unwrap())
+            }
+        }
+        _ => {String::new()}
     };
 
     if let Err(e) = stream.write_all(request.as_bytes()) {
@@ -799,7 +927,7 @@ fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpS
     }
     let response = String::from_utf8_lossy(&buffer);
     match request_type {
-        RequestType::GET_DIR => {
+        RequestType::GET_DIR | RequestType::FILTER=> {
             StringVec::VecVecString(from_str::<Vec<Vec<String>>>(&response).unwrap())
         }
         RequestType::GET_FILE => {
@@ -811,13 +939,51 @@ fn get_specific_content_from_server(request_type: RequestType, mut stream: &TcpS
                 _ => StringVec::VecString(None),
             }
         }
+        _ => {StringVec::VecString(None)}
     }
 }
-fn send_file_to_server(mut stream: &TcpStream, path: &str, file_content: String){
-    let request = format!("SAVE_FILE {};{}", path, file_content);
-    if let Err(e) = stream.write_all(request.as_bytes()) {
-        eprintln!("Failed to send request: {}", e);
+fn send_request_to_server(mut stream: &TcpStream, request_type: RequestType, path: &str, file_content: String){
+    match request_type {
+        RequestType::SAVE_FILE =>{
+            let request = format!("SAVE_FILE {};{}", path, file_content);
+            if let Err(e) = stream.write_all(request.as_bytes()) {
+                eprintln!("Failed to send request: {}", e);
+            }
+        }
+        _ =>{
+            // Handle other operations that need to be performed on the server
+            let request = format!("{:?} {}", request_type, path);
+            if let Err(e) = stream.write_all(request.as_bytes()) {
+                eprintln!("Failed to send request: {}", e);
+            }
+        }
     }
+}
+fn wait_for_server_response(mut stream: &TcpStream) -> Result<(),()>{
+    let mut buffer = Vec::new();
+    let mut temp_buffer = [0u8; 1000];
+    match stream.read(&mut temp_buffer) {
+        // Stream closed
+        Ok(0) => {
+            ratatui::restore();
+            eprintln!("Server closed connection");
+            process::exit(-1);
+        }
+        Ok(n) => {
+            buffer.extend_from_slice(&temp_buffer[..n]);
+        }
+        Err(e) => {
+            eprintln!("Failed to read from server: {}", e);
+        }
+    }
+    let response = String::from_utf8_lossy(&buffer);
+    if response.starts_with("Error"){
+        return Err(());
+    }
+    else{
+        return Ok(());
+    }
+
 }
 fn create_menu_items<'a>() -> Vec<(MenuOption, ListItem<'a>)> {
     let mut output: Vec<(MenuOption, ListItem)> = Vec::new();
@@ -885,7 +1051,8 @@ fn create_layouts(f: &mut Frame, mut basic_layout: &mut Vec<Rc<[Rect]>>, mut vie
         input_layout.push(Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(100),
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
             ])
             .split(grid_layout[1]));
     }
@@ -900,8 +1067,8 @@ fn main() {
             let initial_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1";
             let second_path = "/mnt/c/Users/sisin/OneDrive/Plocha/VSB-ING1/PvR";
 
-            let entries_info : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, initial_path, Some(0)).into();
-            let entries_info_2 : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, second_path, Some(0)).into();
+            let entries_info : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, initial_path, Some(0), None).into();
+            let entries_info_2 : Vec<Vec<String>> = get_specific_content_from_server(RequestType::GET_DIR, &stream, second_path, Some(0), None).into();
 
             let left_side = ClientLogic::new(entries_info.clone(), initial_path.to_string());
             let right_side = ClientLogic::new(entries_info_2.clone(), second_path.to_string());
